@@ -4,44 +4,38 @@ from pyspark.sql import SparkSession
 from pyspark.sql.types import *
 import pyspark.sql.functions as psf
 
-
 # TODO Create a schema for incoming resources
 schema = StructType([
-    StructField("crime_id", StringType(), True),                
-    StructField("original_crime_type_name", StringType(), False),
-    StructField("report_date", StringType(), True),             
-    StructField("call_date", StringType(), True),               
-    StructField("offense_date", StringType(), True),            
-    StructField("call_time", StringType(), True),               
-    StructField("call_date_time", StringType(), False),          
-    StructField("disposition", StringType(), True),             
-    StructField("address", StringType(), True),                 
-    StructField("city", StringType(), True),                    
-    StructField("state", StringType(), True),                   
-    StructField("agency_id", StringType(), True),               
-    StructField("address_type", StringType(), True),            
-    StructField("common_location", StringType(), True)         
+    StructField('crime_id', StringType(), True),
+    StructField('original_crime_type_name', StringType(), True),
+    StructField('report_date', StringType(), True),
+    StructField('call_date', StringType(), True),
+    StructField('offense_date', StringType(), True),
+    StructField('call_time', StringType(), True),
+    StructField('call_date_time', TimestampType(), True),
+    StructField('disposition', StringType(), True),
+    StructField('address', StringType(), True),
+    StructField('city', StringType(), True),
+    StructField('state', StringType(), True),
+    StructField('agency_id', StringType(), True),
+    StructField('address_type', StringType(), True),
+    StructField('common_location', StringType(), True),
 ])
 
 def run_spark_job(spark):
 
     # TODO Create Spark Configuration
-    # Create Spark configurations with max offset of 200 per trigger
     # set up correct bootstrap server and port
     df = spark \
         .readStream \
-        .format("kafka") \
-        .option("kafka.bootstrap.servers", "localhost:3000") \
-        .option("subscribe", "com.udacity.crime.police-event") \
-        .option("startingOffsets", "earliest") \
-        .option("maxOffsetsPerTrigger", 200) \
-        .option("stopGracefullyOnShutdown", "true") \
+        .format('kafka') \
+        .option('kafka.bootstrap.servers', 'localhost:9092') \
+        .option('subscribe', 'com.udacity.crime.events.new') \
+        .option('startingOffsets', 'earliest') \
+        .option('maxOffsetsPerTrigger', 10) \
+        .option('maxRatePerPartition', 10) \
         .load()
-    
-    spark = SparkSession \
-    .builder \
-    .appName("Spark SQL Quiz") \
-    .getOrCreate()
+
     # Show schema for the incoming resources for checks
     df.printSchema()
 
@@ -52,30 +46,21 @@ def run_spark_job(spark):
     service_table = kafka_df.select(psf.from_json(psf.col('value'), schema).alias("service")).select("service.*")
 
     # TODO select original_crime_type_name and disposition
-    distinct_table = service_table.select(
-        psf.col('crime_id'),
-        psf.col('original_crime_type_name'),
-        psf.to_timestamp(psf.col('call_date_time')).alias("date_time"),
-        psf.col('address'),
-        psf.col('disposition')
-    )
+    distinct_table = service_table.select('original_crime_type_name', 'disposition', 'call_date_time').distinct().withWatermark('call_date_time', "1 minute")
 
     # count the number of original crime type
-    agg_df = distinct_table.withWatermark("date_time", "60 minutes").groupBy(
-        psf.window(distinct_table.date_time, "10 minutes", "5 minutes"),
-        distinct_table.original_crime_type_name
-    ).count()
+    agg_df = distinct_table.dropna().select('original_crime_type_name').groupby('original_crime_type_name').agg({'original_crime_type_name': 'count'}).orderBy('count(original_crime_type_name)', descending=True)
 
     # TODO Q1. Submit a screen shot of a batch ingestion of the aggregation
     # TODO write output stream
-    query = agg_df.writeStream.outputMode('complete').format('console').start()
+    query = agg_df.writeStream.format('console').outputMode('complete').start()
 
 
     # TODO attach a ProgressReporter
     query.awaitTermination()
 
     # TODO get the right radio code json path
-    radio_code_json_filepath = "radio_code.json" 
+    radio_code_json_filepath = "radio_code.json"
     radio_code_df = spark.read.json(radio_code_json_filepath)
 
     # clean up your data so that the column names match on radio_code_df and agg_df
@@ -85,17 +70,11 @@ def run_spark_job(spark):
     radio_code_df = radio_code_df.withColumnRenamed("disposition_code", "disposition")
 
     # TODO join on disposition column
-    join_query = agg_df \
-        .join(radio_code_df, col("agg_df.disposition") == col("radio_code_df.disposition"), "left_outer")
-
+    join_query = agg_df.join(radio_code_df, col('agg_df.disposition') == col('radio_code_df.disposition'), 'left_outer')
 
 
     join_query.awaitTermination()
 
-    
-@psf.udf(StringType())
-def convert_timestamp(timestamp):
-    return parse_date(timestamp).strftime('%y%m%d%H')
 
 if __name__ == "__main__":
     logger = logging.getLogger(__name__)
@@ -103,9 +82,9 @@ if __name__ == "__main__":
     # TODO Create Spark in Standalone mode
     spark = SparkSession \
         .builder \
-        .config("spark.ui.port", 3000) \
         .master("local[*]") \
         .appName("KafkaSparkStructuredStreaming") \
+        .config("spark.ui.port", 3000) \
         .getOrCreate()
 
     logger.info("Spark started")
